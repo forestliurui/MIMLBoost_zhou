@@ -1,4 +1,4 @@
-function [classifiers,c_values,Iter,tr_time]=MIMLBoost_train(train_bags,train_target,rounds,svm,cost)
+function [classifiers,c_values,Iter,tr_time]=MIMLBoost_train(bags,targets,trainset_name,rounds,svm,cost)
 %MIMLBoost_train implements the training procedure of MIMLBOOST as shown in [1].
 %
 %N.B.: MIMLBoost employs the Matlab version of Libsvm [2] (available at http://sourceforge.net/projects/svm/) as the base learners
@@ -30,6 +30,13 @@ function [classifiers,c_values,Iter,tr_time]=MIMLBoost_train(train_bags,train_ta
 %Preparing data
     
      start_time=cputime;
+     
+     [temp_prefix, bag_train_index]=textread(['folds/',trainset_name,'.view'],'%s%d','delimiter',',');
+     train_target=targets(:,bag_train_index);
+     train_bags=bags(bag_train_index,1);
+     
+     
+     
      
      [num_class,num_bags]=size(train_target);
      
@@ -107,6 +114,93 @@ function [classifiers,c_values,Iter,tr_time]=MIMLBoost_train(train_bags,train_ta
          end
          inst_weight=vec1./vec2;
          
+         
+         
+        for inner_CV_index=0:4 %inner loop used for tuning the parameters
+            inner_trainset_name=[trainset_name,'.fold_000',num2str(inner_CV_index), '_of_0005.train'];
+            inner_testset_name=[trainset_name,'.fold_000',num2str(inner_CV_index), '_of_0005.test'];
+        
+            
+            
+            [temp_prefix, inner_train_bag_index]=textread(['folds/',inner_trainset_name,'.view'],'%s%d','delimiter',',');
+            inner_trainset_bag=bags(inner_train_bag_index,1); %bag index starts from 1 to 2000
+            inner_trainset_target=targets(:,inner_train_bag_index);
+        
+       %     for ii=1:length(inner_train_bag_index)
+                
+             %   inner_train_inst_weight(1,ii) = inst_weight(find(bag_train_index==inner_train_bag_index(ii)));
+            %end
+           
+	    inner_train_inst_weight=[];
+            for ii=1:length(inner_train_bag_index)
+                i=find(bag_train_index==inner_train_bag_index(ii));
+                for j=1:num_class
+                    low=sum(inst_num(1:((i-1)*num_class+j-1)))+1;
+                    high=sum(inst_num(1:((i-1)*num_class+j)));
+                    inner_train_inst_weight=[inner_train_inst_weight,inst_weight(low:high)];
+                end
+%                 inner_test_inst_weight(1,ii) = inst_weight(find(bag_train_index==inner_test_bag_index(ii)));
+            end
+ 
+            [temp_prefix, inner_test_bag_index]=textread(['folds/',inner_testset_name,'.view'],'%s%d','delimiter',',');
+            inner_testset_bag=bags(inner_test_bag_index,1); %bag index starts from 1 to 2000
+            inner_testset_target=targets(:,inner_test_bag_index);
+        
+            %for ii=1:length(inner_test_bag_index)
+                
+             %   inner_test_inst_weight(1,ii) = inst_weight(find(bag_train_index==inner_test_bag_index(ii)));
+            %end
+                  
+	    inner_test_inst_weight=[];
+            for ii=1:length(inner_test_bag_index)
+                i=find(bag_train_index==inner_test_bag_index(ii));
+                for j=1:num_class
+                    low=sum(inst_num(1:((i-1)*num_class+j-1)))+1;
+                    high=sum(inst_num(1:((i-1)*num_class+j)));
+                    inner_test_inst_weight=[inner_test_inst_weight,inst_weight(low:high)];
+                end
+%                 inner_test_inst_weight(1,ii) = inst_weight(find(bag_train_index==inner_test_bag_index(ii)));
+            end
+
+
+            
+            %% construct relevant instances     
+            [inner_num_class,inner_num_bags]=size(inner_trainset_target);
+     
+            [inner_inst_num,inner_instances,inner_inst_labels ]=construction_basic(inner_trainset_bag, inner_trainset_target);
+            %%
+           
+            
+            %build base learner using resampling
+            rand('twister',sum(100*clock));
+            inner_index=randsample(sum(inner_inst_num),sum(inner_inst_num),true,inner_train_inst_weight)';
+            inner_Samples=instances(:,inner_index);
+            inner_Labels=inst_labels(:,inner_index);  
+        
+            
+            %try different combination of parameters
+            for para_index=1:15
+                fprintf(1,'Inner Training set: %s\n',inner_trainset_name);
+                fprintf(1,'Inner Test set: %s\n',inner_testset_name);
+                fprintf(1,'Inner CV parameter index %d/15\n', para_index)
+                C_list(para_index)=exp(8*rand()-3);
+                gamma_list(para_index)=exp(7*rand()-6);
+                t=2;
+                str=['-t ',num2str(t),' -g ',num2str(gamma_list(para_index)),' -c ',num2str(C_list(para_index))];
+                model=svmtrain(inner_Labels',inner_Samples',str);
+                
+                inner_classifiers(1).model=model;
+                inner_c_values(1)=1;
+                
+                [inner_HammingLoss(para_index),inner_RankingLoss(para_index),inner_OneError(para_index),inner_Coverage(para_index),inner_Average_Precision(inner_CV_index+1,para_index),inner_Outputs,inner_Pre_Labels,inner_te_time]=MIMLBoost_test(inner_testset_bag,inner_testset_target,inner_classifiers,inner_c_values,1);
+            end
+          
+     end
+         [inner_AP_max_v, inner_AP_max_index]=max(mean(inner_Average_Precision,1));
+         
+         svm.para=gamma_list(inner_AP_max_index);
+         cost=C_list(inner_AP_max_index);
+         
          %build base learner using resampling
          rand('twister',sum(100*clock));
          index=randsample(sum(inst_num),sum(inst_num),true,inst_weight)';
@@ -116,8 +210,7 @@ function [classifiers,c_values,Iter,tr_time]=MIMLBoost_train(train_bags,train_ta
          if(strcmp(svm.type,'RBF'))
              t=2;
              gamma=svm.para;
-             %str=['-t ',num2str(t),' -g ',num2str(gamma),' -c ',num2str(cost)];
-	     str=['-t ', num2str(t)];%use default value for gamma and C (cost)
+             str=['-t ',num2str(t),' -g ',num2str(gamma),' -c ',num2str(cost)];
          else
              if(strcmp(svm.type,'Poly'))
                  t=1;
@@ -131,8 +224,8 @@ function [classifiers,c_values,Iter,tr_time]=MIMLBoost_train(train_bags,train_ta
              end
          end
          display('begin training...');
-          model=svmtrain(Labels',Samples',str);
-%         model=svmtrain(ones(length(Labels)), Labels',Samples',str);
+%          model=svmtrain(Labels',Samples',str);
+         model=svmtrain(ones(length(Labels)), Labels',Samples',str);
          errors=[];
          for i=1:num_bags
              for j=1:num_class
